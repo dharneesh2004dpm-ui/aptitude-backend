@@ -1,54 +1,51 @@
-// backend/server.js
 const express = require('express');
 const mongoose = require('mongoose');
 const cors = require('cors');
+
 const app = express();
-
-app.use(express.json());
 app.use(cors());
+app.use(express.json());
 
-// Connect to MongoDB
-mongoose.connect('mongodb+srv://dharaneeshd7:ovCosKfxTYJwL3rd@cluster0.pvff5yv.mongodb.net/?appName=Cluster0')
-  .then(() => console.log("MongoDB Connected"))
-  .catch(err => console.log("MongoDB Connection Error:", err));
+// IMPORTANT: Replace the string below with your actual MongoDB URL if not using process.env
+const MONGO_URI = process.env.MONGO_URI || "mongodb+srv://<username>:<password>@cluster0.mongodb.net/aptitude_db"; 
+mongoose.connect(MONGO_URI).then(() => console.log("MongoDB Connected")).catch(err => console.log(err));
 
-// --- DATABASE SCHEMAS ---
-
-const UserSchema = new mongoose.Schema({
+// --- 1. SCHEMAS (Database Structure) ---
+const userSchema = new mongoose.Schema({
     email: { type: String, required: true, unique: true },
     password: { type: String, required: true },
-    role: { type: String, default: 'student' } // 'student' or 'admin'
+    role: { type: String, enum: ['student', 'admin'], default: 'student' },
+    resetOTP: { type: String },
+    otpExpiry: { type: Date }
 });
-const User = mongoose.model('User', UserSchema);
+const User = mongoose.model('User', userSchema);
 
-const QuestionSchema = new mongoose.Schema({
-    topic: String, 
-    questionText: String,
-    options: [String],
-    correctAnswer: String,
-    explanation: String 
+const questionSchema = new mongoose.Schema({
+    topic: { type: String, required: true },
+    difficulty: { type: String, enum: ['easy', 'medium', 'hard'], default: 'medium' },
+    questionText: { type: String, required: true },
+    options: [{ type: String, required: true }],
+    correctAnswer: { type: String, required: true },
+    explanation: { type: String },
+    marks: { type: Number, default: 1 },
+    timeSeconds: { type: Number, default: 60 }
 });
-const Question = mongoose.model('Question', QuestionSchema);
+const Question = mongoose.model('Question', questionSchema);
 
-const TestSchema = new mongoose.Schema({
-    title: String,
+const testSchema = new mongoose.Schema({
+    title: { type: String, required: true },
     questions: [{ type: mongoose.Schema.Types.ObjectId, ref: 'Question' }],
-    durationMinutes: Number,
-    extraTimeAdded: { type: Number, default: 0 }
+    durationMinutes: { type: Number, required: true },
+    isLive: { type: Boolean, default: false },
+    scheduledStart: { type: Date },
+    maxAttempts: { type: Number, default: 1 }
 });
-const Test = mongoose.model('Test', TestSchema);
+const Test = mongoose.model('Test', testSchema);
 
-const ResultSchema = new mongoose.Schema({
-    studentEmail: String,
-    testId: { type: mongoose.Schema.Types.ObjectId, ref: 'Test' },
-    score: Number,
-    timeTakenSeconds: Number,
-    studentAnswers: Object 
-});
-const Result = mongoose.model('Result', ResultSchema);
 
-// --- API ENDPOINTS ---
-// Admin: Fetch all questions to build a test
+// --- 2. ROUTES (API Endpoints) ---
+
+// Get all questions for Admin
 app.get('/api/admin/questions', async (req, res) => {
     try {
         const questions = await Question.find();
@@ -58,90 +55,51 @@ app.get('/api/admin/questions', async (req, res) => {
     }
 });
 
-// Admin: Add a Question
+// Admin Add Question
 app.post('/api/admin/questions', async (req, res) => {
     try {
-        const question = await Question.create(req.body);
-        res.json(question);
+        const newQuestion = await Question.create(req.body);
+        res.json(newQuestion);
     } catch (err) {
         res.status(500).json({ error: err.message });
     }
 });
 
-// Admin: Create a Test
+// Admin Create Test
 app.post('/api/admin/tests', async (req, res) => {
     try {
-        const test = await Test.create(req.body);
+        const newTest = await Test.create(req.body);
+        res.json(newTest);
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// NEW: IndiaBix Practice Engine - Fetch questions by specific topic
+app.get('/api/practice/:topic', async (req, res) => {
+    try {
+        const topicName = decodeURIComponent(req.params.topic);
+        const questions = await Question.find({ topic: topicName });
+        res.json(questions);
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// Student Fetch Live Test
+app.get('/api/test/:id', async (req, res) => {
+    try {
+        const test = await Test.findById(req.params.id).populate('questions');
         res.json(test);
     } catch (err) {
         res.status(500).json({ error: err.message });
     }
 });
 
-// Student: Fetch Test (Questions Shuffled, Answers Hidden)
-app.get('/api/test/:id', async (req, res) => {
-    try {
-        const test = await Test.findById(req.params.id).populate('questions');
-        const shuffled = test.questions.sort(() => Math.random() - 0.5);
-        
-        const safeQuestions = shuffled.map(q => ({
-            _id: q._id,
-            questionText: q.questionText,
-            options: q.options
-        }));
-
-        res.json({ 
-            title: test.title, 
-            durationMinutes: test.durationMinutes + test.extraTimeAdded, 
-            questions: safeQuestions 
-        });
-    } catch (err) {
-        res.status(500).json({ error: "Test not found" });
-    }
-});
-
-// Student: Submit Test and Auto-Evaluate
+// Student Submit Test
 app.post('/api/test/:id/submit', async (req, res) => {
-    try {
-        const { studentEmail, studentAnswers, timeTakenSeconds } = req.body;
-        const test = await Test.findById(req.params.id).populate('questions');
-        
-        let score = 0;
-        let detailedResults = [];
-
-        test.questions.forEach(q => {
-            const isCorrect = studentAnswers[q._id] === q.correctAnswer;
-            if (isCorrect) score += 1;
-            
-            detailedResults.push({
-                question: q.questionText,
-                selectedOption: studentAnswers[q._id],
-                correctOption: q.correctAnswer,
-                explanation: q.explanation,
-                isCorrect
-            });
-        });
-
-        await Result.create({
-            studentEmail, testId: req.params.id, score, timeTakenSeconds, studentAnswers
-        });
-
-        res.json({ score, total: test.questions.length, detailedResults });
-    } catch (err) {
-        res.status(500).json({ error: err.message });
-    }
+    res.json({ message: "Test submitted successfully" });
 });
 
-// Leaderboard Fetch
-app.get('/api/leaderboard/:testId', async (req, res) => {
-    try {
-        const results = await Result.find({ testId: req.params.testId })
-            .sort({ score: -1, timeTakenSeconds: 1 });
-        res.json(results);
-    } catch (err) {
-        res.status(500).json({ error: err.message });
-    }
-});
-
-// Start Server
-app.listen(5000, () => console.log('Backend running on port 5000'));
+const PORT = process.env.PORT || 5000;
+app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
